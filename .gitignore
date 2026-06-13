@@ -1,0 +1,26 @@
+# Rust / Cargo build artifacts
+/target/
+
+# Backup files from older rustfmt
+**/*.rs.bk
+
+# MSVC debug info
+*.pdb
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store
+
+# Claude Code local config / tooling — not tracked in the repo
+.claude/
+CLAUDE.md
+
+# Local docs / working notes — not tracked in the repo
+docs/
+playground/
+
+# Local bukagu store — machine-specific source/destination paths, created at runtime
+/.bukagu/
+
+# Note: Cargo.lock is intentionally committed — bukagu is a binary, not a library.
