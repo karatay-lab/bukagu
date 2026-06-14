@@ -4,6 +4,49 @@ A Swiss Army knife CLI/TUI for developers, written in Rust. The first tool it sh
 with is **folder syncing**: mirror one master folder into many backups, on demand,
 from a colorful terminal dashboard.
 
+## Install
+
+bukagu ships as a single static binary with no runtime dependencies, so it runs
+on any Linux distro regardless of glibc version.
+
+### Quick install (Linux, x86_64 / aarch64)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/karatay-lab/bukagu/main/install.sh | sh
+```
+
+Installs to `~/.local/bin` by default. Override with `BUKAGU_INSTALL_DIR=/usr/local/bin`
+(may need `sudo`) or pin a version with `BUKAGU_VERSION=v0.1.0`.
+
+### Debian / Ubuntu (.deb)
+
+Download the `.deb` for your architecture from the
+[latest release](https://github.com/karatay-lab/bukagu/releases/latest), then:
+
+```bash
+sudo apt install ./bukagu-*.deb     # or: sudo dpkg -i bukagu-*.deb
+```
+
+Uninstall with `sudo apt remove bukagu`.
+
+### Homebrew (Linux & macOS)
+
+```bash
+brew install karatay-lab/tap/bukagu
+```
+
+### From crates.io (needs a Rust toolchain)
+
+```bash
+cargo install bukagu
+```
+
+### Prebuilt binaries
+
+Grab a `.tar.gz` for your platform from the
+[releases page](https://github.com/karatay-lab/bukagu/releases), extract, and put
+`bukagu` somewhere on your `PATH`. Each archive ships a `.sha256` checksum.
+
 > **Safety first.** The source folder is **read-only to bukagu** — it only ever writes
 > into destinations. This is enforced in code (canonicalized path checks before any
 > scan *and* before any write), not just by convention. bukagu refuses to run if a
@@ -25,7 +68,7 @@ from a colorful terminal dashboard.
 The choice of folders is saved to `./.bukagu/bukagu-store.json` (relative to the
 directory you launch from), so subsequent runs go straight to the dashboard.
 
-## Install / build
+## Build from source
 
 Requires a recent stable Rust toolchain (Rust 2024 edition, ≥ 1.85).
 
