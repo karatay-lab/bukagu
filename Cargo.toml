@@ -25,3 +25,29 @@ walkdir = "2.5.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+# Lean release binaries: strip symbols (done by rustc, so it works for
+# cross-compiled targets too) and link-time optimize. Applies to every
+# `--release` build, including the artifacts the release workflow ships.
+[profile.release]
+strip = true
+lto = "thin"
+
+# `.deb` packaging metadata, consumed by `cargo deb`.
+# bukagu has no system-library deps beyond glibc, so we pin `libc6` rather than
+# letting dpkg-shlibdeps probe (which is unreliable when cross-compiling arm64).
+[package.metadata.deb]
+maintainer = "Berkay Karatay <karatay.berkay@gmail.com>"
+copyright = "2026, Berkay Karatay"
+license-file = ["LICENSE-MIT", "0"]
+extended-description = """
+bukagu is a Rust CLI/TUI — a Swiss Army knife for developers, starting with
+file syncing: mirror one read-only source folder into many destinations, or map
+individual files, all from a ratatui dashboard."""
+section = "utils"
+priority = "optional"
+depends = "libc6"
+assets = [
+    ["target/release/bukagu", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/bukagu/README.md", "644"],
+]

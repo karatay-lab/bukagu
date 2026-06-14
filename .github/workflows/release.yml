@@ -1,0 +1,144 @@
+name: Release
+
+# Cut a release by pushing a semver tag, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# This builds static musl binaries (x86_64 + aarch64) and native .deb packages
+# (amd64 + arm64), attaches them to a GitHub Release, and — when the matching
+# secrets are present — publishes to crates.io and updates the Homebrew tap.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Probe for optional secrets so the crates.io / Homebrew jobs cleanly skip
+  # (rather than fail red) on forks or before the secrets are configured.
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      publish_crate: ${{ steps.s.outputs.publish_crate }}
+      publish_brew: ${{ steps.s.outputs.publish_brew }}
+    steps:
+      - id: s
+        env:
+          CRATE_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          BREW_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          echo "publish_crate=$([ -n "$CRATE_TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "publish_brew=$([ -n "$BREW_TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Portable static binaries: musl means zero runtime deps, so these run on any
+  # Linux distro/glibc version. Shipped as .tar.gz + .sha256.
+  binaries:
+    needs: create-release
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: bukagu
+          target: ${{ matrix.target }}
+          archive: $bin-$tag-$target
+          checksum: sha256
+          include: README.md,LICENSE-MIT,LICENSE-APACHE
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Native Debian/Ubuntu packages. We build against glibc (not musl) so the
+  # .deb integrates with the system the way apt users expect. `cross` provides
+  # the (old-glibc) toolchain, which keeps the package broadly compatible.
+  deb:
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            deb_arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            deb_arch: arm64
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross,cargo-deb
+      - name: Build binary
+        run: cross build --release --locked --target ${{ matrix.target }}
+      - name: Package .deb
+        run: cargo deb --no-build --no-strip --target ${{ matrix.target }} --output "bukagu-${TAG}-${{ matrix.deb_arch }}.deb"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" "bukagu-${TAG}-${{ matrix.deb_arch }}.deb" --clobber
+
+  # `cargo install bukagu`. Runs only when CARGO_REGISTRY_TOKEN is set.
+  crates-io:
+    needs: [create-release, preflight]
+    if: needs.preflight.outputs.publish_crate == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Update the Homebrew tap formula. Runs only when HOMEBREW_TAP_TOKEN is set
+  # and the karatay-lab/homebrew-tap repo exists.
+  homebrew:
+    needs: [create-release, binaries, preflight]
+    if: needs.preflight.outputs.publish_brew == 'true'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render formula from release checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${TAG#v}"
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
+            -p '*-unknown-linux-musl.tar.gz.sha256' -D sums
+          amd_sha=$(awk '{print $1}' "sums/bukagu-${TAG}-x86_64-unknown-linux-musl.tar.gz.sha256")
+          arm_sha=$(awk '{print $1}' "sums/bukagu-${TAG}-aarch64-unknown-linux-musl.tar.gz.sha256")
+          sed -e "s|@VERSION@|${version}|g" \
+              -e "s|@TAG@|${TAG}|g" \
+              -e "s|@AMD_SHA@|${amd_sha}|g" \
+              -e "s|@ARM_SHA@|${arm_sha}|g" \
+              packaging/homebrew/bukagu.rb.tmpl > bukagu.rb
+      - name: Commit to tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/karatay-lab/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp bukagu.rb tap/Formula/bukagu.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/bukagu.rb
+          git commit -m "bukagu ${TAG}"
+          git push
