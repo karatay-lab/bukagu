@@ -74,7 +74,11 @@ async fn run() -> Result<()> {
     let mut last_run: Option<String> = None;
     loop {
         let initial = store.as_ref().map(|s| s.config.clone());
-        let (config, intent) = ui::browser::run_home(initial, last_run.take())?;
+        let mappings = store
+            .as_ref()
+            .map(|s| s.mappings.clone())
+            .unwrap_or_default();
+        let (config, intent) = ui::browser::run_home(initial, mappings, last_run.take())?;
 
         // Persist any edits the user made in the home (even before a sync, and even
         // if they're about to quit), preserving the store's created_at/last_sync.
@@ -102,6 +106,14 @@ async fn run() -> Result<()> {
                     continue;
                 };
                 last_run = Some(run_sync(store.as_mut(), config, opts).await?);
+            }
+            HomeIntent::Mappings => {
+                // open_mappings() also requires a source + ≥1 destination.
+                let Some(config) = config else {
+                    last_run = Some("Add a source and a destination before mapping files.".into());
+                    continue;
+                };
+                last_run = run_mappings(store.as_mut(), &config, opts)?;
             }
         }
     }
@@ -140,4 +152,27 @@ async fn run_sync(
         Outcome::UpToDate => "Everything is already in sync — nothing to do.".into(),
         Outcome::Cancelled => "Sync cancelled — no changes made.".into(),
     })
+}
+
+/// Open the v2 file-mapping screen, persist the edited mappings back to the store,
+/// and stamp `last_sync` on a real (non-dry-run) mapping sync. Returns a one-line
+/// summary for the home's "Last run" line, or `None` if no sync ran.
+fn run_mappings(
+    store: Option<&mut Store>,
+    config: &store::Config,
+    opts: RunOptions,
+) -> Result<Option<String>> {
+    let existing = store
+        .as_ref()
+        .map(|s| s.mappings.clone())
+        .unwrap_or_default();
+    let session = ui::mappings::run(config, existing, opts)?;
+    if let Some(store) = store {
+        store.mappings = session.mappings;
+        if session.synced {
+            store.mark_synced();
+        }
+        store.save().context("saving your file mappings")?;
+    }
+    Ok((!session.summary.is_empty()).then_some(session.summary))
 }

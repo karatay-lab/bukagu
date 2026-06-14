@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub mod apply;
+pub mod banner;
 pub mod diff;
 pub mod hash;
+pub mod mapping;
 pub mod scan;
 
 /// One entry discovered while scanning a folder tree. Within a [`Scan`] it is

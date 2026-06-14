@@ -6,4 +6,5 @@
 
 pub mod browser;
 pub mod dashboard;
+pub mod mappings;
 pub mod widgets;

@@ -11,8 +11,11 @@
 //!     stats (size, file count, mapped count) are always shown at the top (no key
 //!     needed); below them a `Destination Folders` header that `Enter` expands
 //!     into the destination list, and `Enter` on a destination reveals *its* stats
-//!     inline. Only one destination is open at a time (opening another closes it);
-//!     `Backspace` collapses the open folder, then the list.
+//!     plus a nested accordion of the files mapped into it, grouped by source
+//!     folder; `Enter` on a group expands its `source → target` rows. Only one
+//!     destination is open at a time, and within it only one source-folder group
+//!     (opening another closes the previous); `Backspace` collapses the open group,
+//!     then the destination, then the list.
 //!
 //! `Tab` switches focus between the two panes (the focused one takes the cursor
 //! keys and gets a gold border). `Ctrl+Q` toggles a full-screen overlay listing
@@ -32,6 +35,7 @@
 //! redraws on input), and returns the (possibly edited) [`Config`] plus the
 //! [`HomeIntent`] the user finished on — `Sync` to run a sync, or `Quit`.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -44,7 +48,7 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap}
 use ratatui::{DefaultTerminal, Frame};
 use walkdir::WalkDir;
 
-use crate::store::Config;
+use crate::store::{Config, Mapping};
 use crate::theme;
 use crate::ui::widgets::human_bytes;
 
@@ -104,8 +108,11 @@ enum InfoTarget {
     /// The `Destination Folders` header — `Enter` reveals/hides the list.
     DestHeader,
     /// One destination row (index into `destinations`) — `Enter` expands its
-    /// files inline.
+    /// stats and its source-folder groups inline.
     Dest(usize),
+    /// A source-folder group inside the currently-expanded destination (index into
+    /// that destination's sorted group list) — `Enter` expands its mapped files.
+    Folder(usize),
 }
 
 /// How the home loop ended.
@@ -113,6 +120,8 @@ enum Outcome {
     /// "Sync now" — the user wants to run a sync. The config is read back from the
     /// browser's fields via [`Browser::current_config`].
     Confirmed,
+    /// "Map files" — open the v2 file-mapping screen with the current config.
+    OpenMappings,
     /// `q`/`Esc` — leave the home (any edits are still returned to the caller).
     Cancelled,
 }
@@ -120,8 +129,10 @@ enum Outcome {
 /// What the user asked for when the home screen returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeIntent {
-    /// Run a sync with the returned config.
+    /// Run a v1 folder-mirror sync with the returned config.
     Sync,
+    /// Open the v2 file-mapping screen with the returned config.
+    Mappings,
     /// Close the home.
     Quit,
 }
@@ -141,6 +152,10 @@ struct Browser {
     /// Which destination's files are expanded inline, if any (accordion — at most
     /// one open at a time).
     info_dest_expanded: Option<usize>,
+    /// Which source-folder group inside the expanded destination is open, if any
+    /// (a nested accordion — at most one open at a time, reset when the open
+    /// destination changes). Indexes the open destination's group list.
+    info_folder_expanded: Option<usize>,
     /// Highlighted selectable info row, indexing [`Browser::info_targets`]
     /// (0 = the `Destination Folders` header).
     info_sel: usize,
@@ -148,6 +163,9 @@ struct Browser {
     // --- the result ---
     source: Option<PathBuf>,
     destinations: Vec<PathBuf>,
+    /// The v2 file mappings, loaded from the store — read-only here, used only to
+    /// show how many of each folder's files are mapped in the info pane.
+    mappings: Vec<Mapping>,
 
     // --- folder browser modal ---
     /// The launch directory (where bukagu was opened and `.bukagu/` lives); the
@@ -183,9 +201,11 @@ impl Browser {
             actions_sel: 0,
             info_dest_list_open: false,
             info_dest_expanded: None,
+            info_folder_expanded: None,
             info_sel: 0,
             source: None,
             destinations: Vec::new(),
+            mappings: Vec::new(),
             root,
             cwd,
             entries: Vec::new(),
@@ -202,16 +222,88 @@ impl Browser {
         b
     }
 
-    /// Build the home pre-filled from a loaded config (returning runs), with an
-    /// optional one-line summary of the previous sync shown atop the info pane.
-    fn home(initial: Option<Config>, last_run: Option<String>) -> Self {
+    /// Build the home pre-filled from a loaded config (returning runs) and its v2
+    /// mappings, with an optional one-line summary of the previous sync shown atop
+    /// the info pane.
+    fn home(initial: Option<Config>, mappings: Vec<Mapping>, last_run: Option<String>) -> Self {
         let mut b = Self::new();
         if let Some(config) = initial {
             b.source = Some(config.source);
             b.destinations = config.destinations;
         }
+        b.mappings = mappings;
         b.last_run = last_run;
         b
+    }
+
+    /// How many of the source's files are mapped — i.e. appear as a mapping's
+    /// source and still exist on disk (so the count lines up with the file count).
+    fn source_mapped(&self) -> usize {
+        let Some(src) = self.source.as_deref() else {
+            return 0;
+        };
+        self.mappings
+            .iter()
+            .filter(|m| src.join(&m.source_rel).is_file())
+            .count()
+    }
+
+    /// How many files inside destination `dir` are mapping targets. Mirrors the
+    /// mapping screen, which attributes each target to the destination root it sits
+    /// under.
+    fn dest_mapped(&self, dir: &Path) -> usize {
+        let root = canonical(dir);
+        self.mappings
+            .iter()
+            .flat_map(|m| &m.targets)
+            .filter(|t| t.starts_with(&root))
+            .count()
+    }
+
+    /// The files mapped into `dir`, grouped by the source file's parent folder for
+    /// the info accordion's nested sub-list. Returns `(folder, files)` sorted by
+    /// folder, where each file is `(source_file_name, target_rel_within_dir)` sorted
+    /// by target. The folder is the source's parent (an empty `PathBuf` for a source
+    /// file at the source root). Empty when nothing maps into `dir`.
+    fn dest_mapping_groups(&self, dir: &Path) -> Vec<(PathBuf, Vec<(PathBuf, PathBuf)>)> {
+        let root = canonical(dir);
+        let mut map: BTreeMap<PathBuf, Vec<(PathBuf, PathBuf)>> = BTreeMap::new();
+        for m in &self.mappings {
+            let folder = m
+                .source_rel
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            let name = m
+                .source_rel
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| m.source_rel.clone());
+            for t in &m.targets {
+                if let Ok(rel) = t.strip_prefix(&root) {
+                    map.entry(folder.clone())
+                        .or_default()
+                        .push((name.clone(), rel.to_path_buf()));
+                }
+            }
+        }
+        let mut groups: Vec<(PathBuf, Vec<(PathBuf, PathBuf)>)> = map.into_iter().collect();
+        for (_, files) in &mut groups {
+            files.sort_by(|a, b| a.1.cmp(&b.1));
+        }
+        groups
+    }
+
+    /// The source-folder groups of the currently-expanded destination, or empty when
+    /// no destination is open. Drives the nested folder accordion's row count.
+    fn open_dest_groups(&self) -> Vec<(PathBuf, Vec<(PathBuf, PathBuf)>)> {
+        match self
+            .info_dest_expanded
+            .and_then(|i| self.destinations.get(i))
+        {
+            Some(d) => self.dest_mapping_groups(d),
+            None => Vec::new(),
+        }
     }
 
     /// The config the user has assembled, or `None` until a source and at least one
@@ -426,8 +518,8 @@ impl Browser {
 
     // --- actions pane -------------------------------------------------------
 
-    /// The number of rows in the actions pane: source, destination, Sync now.
-    const ACTION_COUNT: usize = 3;
+    /// The number of rows in the actions pane: source, destination, Sync now, Map files.
+    const ACTION_COUNT: usize = 4;
 
     fn actions_up(&mut self) {
         self.actions_sel = self.actions_sel.saturating_sub(1);
@@ -439,13 +531,18 @@ impl Browser {
 
     /// Activate the highlighted action. Rows 0/1 open the folder browser for the
     /// source / a destination (adding a destination requires a source first); the
-    /// "Sync now" row hands the config back to run a sync.
+    /// "Sync now" row hands the config back to run a v1 mirror, and "Map files"
+    /// opens the v2 file-mapping screen.
     fn activate_action(&mut self) {
         let target = match self.actions_sel {
             0 => PickTarget::Source,
             1 => PickTarget::Destination,
-            _ => {
+            2 => {
                 self.confirm(); // "Sync now"
+                return;
+            }
+            _ => {
+                self.open_mappings(); // "Map files"
                 return;
             }
         };
@@ -470,13 +567,20 @@ impl Browser {
 
     // --- info pane accordion ------------------------------------------------
 
-    /// The selectable rows, top to bottom: the `Destination Folders` header,
-    /// then (when revealed) one row per destination. The source's files sit above
+    /// The selectable rows, top to bottom: the `Destination Folders` header, then
+    /// (when revealed) one row per destination, and under the expanded one a row per
+    /// source-folder group. The source's files and the destination stats sit between
     /// these, always shown and never selectable.
     fn info_targets(&self) -> Vec<InfoTarget> {
         let mut targets = vec![InfoTarget::DestHeader];
         if self.info_dest_list_open {
-            targets.extend((0..self.destinations.len()).map(InfoTarget::Dest));
+            for i in 0..self.destinations.len() {
+                targets.push(InfoTarget::Dest(i));
+                if self.info_dest_expanded == Some(i) {
+                    let groups = self.dest_mapping_groups(&self.destinations[i]);
+                    targets.extend((0..groups.len()).map(InfoTarget::Folder));
+                }
+            }
         }
         targets
     }
@@ -493,28 +597,39 @@ impl Browser {
         self.info_sel = self.info_sel.saturating_sub(1);
     }
 
-    /// Act on `Enter`: the header reveals/hides the destination list; a
-    /// destination row expands its files (closing whichever was open).
+    /// Act on `Enter`: the header reveals/hides the destination list; a destination
+    /// row expands its stats + folder groups (closing whichever was open); a folder
+    /// row expands its mapped files (closing whichever folder was open).
     fn info_enter(&mut self) {
         match self.info_targets().get(self.info_sel).copied() {
             Some(InfoTarget::DestHeader) => {
                 self.info_dest_list_open = !self.info_dest_list_open;
                 if !self.info_dest_list_open {
                     self.info_dest_expanded = None;
+                    self.info_folder_expanded = None;
                     self.info_sel = 0;
                 }
             }
             Some(InfoTarget::Dest(i)) => {
-                // Accordion: open this one (re-pressing it closes it again).
+                // Accordion: open this one (re-pressing it closes it again). Opening
+                // or switching destinations resets the nested folder accordion.
                 self.info_dest_expanded = (self.info_dest_expanded != Some(i)).then_some(i);
+                self.info_folder_expanded = None;
+            }
+            Some(InfoTarget::Folder(fi)) => {
+                // Nested accordion: one source folder open at a time.
+                self.info_folder_expanded = (self.info_folder_expanded != Some(fi)).then_some(fi);
             }
             None => {}
         }
     }
 
-    /// Collapse one level: the open destination's files first, then the list.
+    /// Collapse one level: the open folder's files first, then the open destination,
+    /// then the list.
     fn info_back(&mut self) {
-        if self.info_dest_expanded.is_some() {
+        if self.info_folder_expanded.is_some() {
+            self.info_folder_expanded = None;
+        } else if self.info_dest_expanded.is_some() {
             self.info_dest_expanded = None;
         } else if self.info_dest_list_open {
             self.info_dest_list_open = false;
@@ -529,6 +644,14 @@ impl Browser {
             && i >= self.destinations.len()
         {
             self.info_dest_expanded = None;
+        }
+        // The open folder is indexed within the open destination's groups; drop it
+        // if no destination is open or it now dangles past that group list.
+        if self
+            .info_folder_expanded
+            .is_some_and(|fi| fi >= self.open_dest_groups().len())
+        {
+            self.info_folder_expanded = None;
         }
         self.info_sel = self.info_sel.min(self.info_len().saturating_sub(1));
     }
@@ -554,6 +677,20 @@ impl Browser {
             return;
         }
         self.outcome = Some(Outcome::Confirmed);
+    }
+
+    /// "Map files": open the v2 file-mapping screen. Needs a source and ≥1
+    /// destination (the folders mappings are picked from and written into).
+    fn open_mappings(&mut self) {
+        if self.current_config().is_none() {
+            if self.source.is_none() {
+                self.error("Choose a source first ([s]) before mapping files.");
+            } else {
+                self.error("Add at least one destination ([a]) before mapping files.");
+            }
+            return;
+        }
+        self.outcome = Some(Outcome::OpenMappings);
     }
 
     fn cancel(&mut self) {
@@ -627,6 +764,10 @@ impl Browser {
                 self.activate_action();
             }
             KeyCode::Char('c') => self.confirm(),
+            KeyCode::Char('m') => {
+                self.actions_sel = 3;
+                self.open_mappings();
+            }
             KeyCode::Char('q') | KeyCode::Esc => self.prompt_quit(),
             _ => match self.main_focus {
                 MainFocus::Actions => match code {
@@ -697,14 +838,16 @@ fn source_conflict(cand: &Path, src: &Path) -> Option<Conflict> {
 }
 
 /// Run the home screen, pre-filled from `initial` (a loaded config on returning
-/// runs, or `None` on first run) and optionally showing `last_run` atop the info
-/// pane. Returns the (possibly edited) config plus whether the user asked to sync
-/// or quit. The terminal is always restored before returning.
+/// runs, or `None` on first run) and its `mappings` (so the info pane can show the
+/// mapped-file counts), optionally showing `last_run` atop the info pane. Returns
+/// the (possibly edited) config plus whether the user asked to sync or quit. The
+/// terminal is always restored before returning.
 pub fn run_home(
     initial: Option<Config>,
+    mappings: Vec<Mapping>,
     last_run: Option<String>,
 ) -> Result<(Option<Config>, HomeIntent)> {
-    let mut browser = Browser::home(initial, last_run);
+    let mut browser = Browser::home(initial, mappings, last_run);
     let mut terminal = ratatui::init();
     let result = run_loop(&mut terminal, &mut browser);
     ratatui::restore();
@@ -725,6 +868,7 @@ fn run_loop(terminal: &mut DefaultTerminal, browser: &mut Browser) -> Result<Hom
         if let Some(outcome) = browser.outcome.take() {
             return Ok(match outcome {
                 Outcome::Confirmed => HomeIntent::Sync,
+                Outcome::OpenMappings => HomeIntent::Mappings,
                 Outcome::Cancelled => HomeIntent::Quit,
             });
         }
@@ -756,9 +900,6 @@ struct FolderStats {
     bytes: u64,
     /// Number of real files (directories aren't counted).
     files: usize,
-    /// Files that map (by relative path) onto the paired folder. Always `0` for
-    /// now — it's only known once a scan/diff runs, so this is a placeholder.
-    mapped: usize,
 }
 
 /// Recursively total a folder's real files: their count and combined size. Skips
@@ -780,16 +921,13 @@ fn folder_stats(dir: &Path) -> FolderStats {
             bytes += meta.len();
         }
     }
-    FolderStats {
-        bytes,
-        files,
-        mapped: 0,
-    }
+    FolderStats { bytes, files }
 }
 
-/// One indented [`Line`] summarising a folder: `size · N files · M mapped`. A
-/// `None` path (nothing chosen yet) gets a single italic note instead.
-fn folder_stat_lines(path: Option<&Path>, indent: &str) -> Vec<Line<'static>> {
+/// One indented [`Line`] summarising a folder: `size · N files · M mapped` (the
+/// `mapped` count is supplied by the caller from the v2 mappings). A `None` path
+/// (nothing chosen yet) gets a single italic note instead.
+fn folder_stat_lines(path: Option<&Path>, mapped: usize, indent: &str) -> Vec<Line<'static>> {
     let Some(path) = path else {
         return vec![Line::from(Span::styled(
             format!("{indent}(not chosen yet)"),
@@ -805,7 +943,7 @@ fn folder_stat_lines(path: Option<&Path>, indent: &str) -> Vec<Line<'static>> {
         human_bytes(stats.bytes),
         stats.files,
         files_word,
-        stats.mapped,
+        mapped,
     );
     vec![Line::from(Span::styled(
         format!("{indent}{summary}"),
@@ -845,7 +983,7 @@ fn draw(frame: &mut Frame, b: &Browser) {
             };
             draw_header(frame, b, header, subtitle);
             let [actions, info] =
-                Layout::vertical([Constraint::Length(5), Constraint::Min(1)]).areas(body);
+                Layout::vertical([Constraint::Length(6), Constraint::Min(1)]).areas(body);
             draw_actions(frame, b, actions);
             draw_info(frame, b, info);
         }
@@ -945,10 +1083,22 @@ fn draw_actions(frame: &mut Frame, b: &Browser, area: Rect) {
             Style::default().fg(theme::TEXT_DIM),
         )
     };
+    let map_hint = if ready {
+        Span::styled(
+            "  (map individual files, with a banner)",
+            Style::default().fg(theme::COPY),
+        )
+    } else {
+        Span::styled(
+            "  (choose a source + destination first)",
+            Style::default().fg(theme::TEXT_DIM),
+        )
+    };
     let rows = [
         ("Select source folder", source_hint),
         ("Select destination folder", dest_hint),
         ("Sync now", sync_hint),
+        ("Map files", map_hint),
     ];
     let items: Vec<ListItem> = rows
         .into_iter()
@@ -1016,7 +1166,7 @@ fn draw_info(frame: &mut Frame, b: &Browser, area: Rect) {
             Span::styled("(not chosen yet)", dim.add_modifier(Modifier::ITALIC)),
         ]))),
     }
-    let src_lines = folder_stat_lines(b.source.as_deref(), "    ");
+    let src_lines = folder_stat_lines(b.source.as_deref(), b.source_mapped(), "    ");
     items.extend(src_lines.into_iter().map(ListItem::new));
     items.push(ListItem::new(Line::from(""))); // spacer
 
@@ -1045,8 +1195,53 @@ fn draw_info(frame: &mut Frame, b: &Browser, area: Rect) {
                     Span::styled(d.display().to_string(), Style::default().fg(theme::COPY)),
                 ])));
                 if open {
-                    let lines = folder_stat_lines(Some(d), "        ");
+                    let lines = folder_stat_lines(Some(d), b.dest_mapped(d), "      ");
                     items.extend(lines.into_iter().map(ListItem::new));
+                    // Nested accordion: the files mapped into this destination,
+                    // grouped by their source folder (one group open at a time).
+                    let groups = b.dest_mapping_groups(d);
+                    if groups.is_empty() {
+                        items.push(ListItem::new(Line::from(Span::styled(
+                            "      (no files mapped into this folder yet)",
+                            dim.add_modifier(Modifier::ITALIC),
+                        ))));
+                    } else {
+                        for (fi, (folder, files)) in groups.iter().enumerate() {
+                            let fopen = b.info_folder_expanded == Some(fi);
+                            let fcaret = if fopen { "▾" } else { "▸" };
+                            let label = if folder.as_os_str().is_empty() {
+                                "(source root)".to_string()
+                            } else {
+                                format!("{}/", folder.display())
+                            };
+                            sel_rows.push(items.len());
+                            items.push(ListItem::new(Line::from(vec![
+                                Span::styled(format!("      {fcaret} "), dim),
+                                Span::styled(
+                                    label,
+                                    Style::default()
+                                        .fg(theme::AMBER)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(format!("  ({})", files.len()), dim),
+                            ])));
+                            if fopen {
+                                for (name, target_rel) in files {
+                                    items.push(ListItem::new(Line::from(vec![
+                                        Span::styled(
+                                            format!("          {}", name.display()),
+                                            Style::default().fg(theme::AMBER),
+                                        ),
+                                        Span::styled("  →  ", dim),
+                                        Span::styled(
+                                            target_rel.display().to_string(),
+                                            Style::default().fg(theme::COPY),
+                                        ),
+                                    ])));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1192,10 +1387,10 @@ fn draw_footer(frame: &mut Frame, b: &Browser, area: Rect) {
         }
         Mode::Main => match b.main_focus {
             MainFocus::Actions => {
-                "↑/↓ choose  Enter activate  [s] source  [a] dest  [c] sync now  Tab focus  Ctrl+Q keys  [q] quit"
+                "↑/↓ choose  Enter activate  [s] source  [a] dest  [c] sync  [m] map files  Tab focus  [q] quit"
             }
             MainFocus::Info => {
-                "↑/↓ move  Enter expand/collapse  Bksp collapse  [c] sync now  Tab focus  Ctrl+Q keys  [q] quit"
+                "↑/↓ move  Enter expand/collapse  Bksp collapse  [c] sync  [m] map files  Tab focus  [q] quit"
             }
         },
     };
@@ -1260,6 +1455,10 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         key("Enter", "open the folder browser / run Sync now"),
         key("s / a", "jump straight to source / destination"),
         key("c", "Sync now (mirror source → destinations)"),
+        key(
+            "m",
+            "Map files (source file → destination file, with a banner)",
+        ),
         Line::from(""),
         section("  Folder browser"),
         key("↑ / ↓  j / k", "move the selection"),
@@ -1281,14 +1480,20 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         key("↑ / ↓", "move between the Destinations header and folders"),
         key(
             "Enter / →",
-            "reveal the list / expand a folder's stats (one open at a time)",
+            "reveal the list / expand a folder, then a source-folder group (one open per level)",
         ),
-        key("Backspace / ←", "collapse the open folder, then the list"),
+        key(
+            "Backspace / ←",
+            "collapse the open group, then the folder, then the list",
+        ),
         Line::from(""),
         section("  Anywhere"),
         key("Tab", "switch focus between actions and info"),
         key("Ctrl+Q", "toggle this overlay"),
-        key("q / Esc", "close bukagu (asks you to confirm; edits are kept)"),
+        key(
+            "q / Esc",
+            "close bukagu (asks you to confirm; edits are kept)",
+        ),
         Line::from(""),
         Line::from(Span::styled(
             "  Press any key to close.",
@@ -1625,6 +1830,60 @@ mod tests {
     }
 
     #[test]
+    fn info_accordion_nests_source_folders_one_open_at_a_time() {
+        let mut b = with_source(PathBuf::from("/src"));
+        b.destinations = vec![PathBuf::from("/d0"), PathBuf::from("/d1")];
+        // d0 has two source-folder groups (docs, zods); d1 has one (zods).
+        b.mappings = vec![
+            Mapping {
+                source_rel: PathBuf::from("zods/api.ts"),
+                targets: vec![PathBuf::from("/d0/api.ts"), PathBuf::from("/d1/x.ts")],
+            },
+            Mapping {
+                source_rel: PathBuf::from("docs/licence.txt"),
+                targets: vec![PathBuf::from("/d0/later.txt")],
+            },
+        ];
+
+        b.info_enter(); // reveal the destination list
+        b.info_down(); // onto d0
+        b.info_enter(); // expand d0
+        assert_eq!(b.info_dest_expanded, Some(0));
+
+        // Targets now: header, Dest(0), Folder(0)=docs, Folder(1)=zods, Dest(1).
+        let targets = b.info_targets();
+        assert!(matches!(targets.get(2), Some(InfoTarget::Folder(0))));
+        assert!(matches!(targets.get(3), Some(InfoTarget::Folder(1))));
+        assert!(matches!(targets.get(4), Some(InfoTarget::Dest(1))));
+
+        // Open the first folder group, then the second — the second closes the first.
+        b.info_sel = 2;
+        b.info_enter();
+        assert_eq!(b.info_folder_expanded, Some(0));
+        b.info_sel = 3;
+        b.info_enter();
+        assert_eq!(b.info_folder_expanded, Some(1));
+
+        // Switching to another destination resets the open folder group.
+        b.info_sel = 4;
+        b.info_enter();
+        assert_eq!(b.info_dest_expanded, Some(1));
+        assert_eq!(b.info_folder_expanded, None);
+
+        // With d1 open, targets are: header, Dest(0), Dest(1), Folder(0). Open d1's
+        // one folder group, then check Backspace collapses folder → destination →
+        // list, in that order.
+        b.info_sel = 3; // d1's one source-folder group
+        b.info_enter();
+        assert_eq!(b.info_folder_expanded, Some(0));
+        b.info_back();
+        assert_eq!(b.info_folder_expanded, None);
+        assert_eq!(b.info_dest_expanded, Some(1));
+        b.info_back();
+        assert_eq!(b.info_dest_expanded, None);
+    }
+
+    #[test]
     fn draw_info_shows_source_and_expanded_destination_stats() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -1642,10 +1901,18 @@ mod tests {
 
         let mut b = with_source(canonical(&src));
         b.destinations = vec![canonical(&dst)];
+        // Map the one source file onto one of the destination's files, so both the
+        // source and the destination report a non-zero mapped count.
+        b.mappings = vec![Mapping {
+            source_rel: PathBuf::from("hello.txt"),
+            targets: vec![canonical(&dst).join("inside.txt")],
+        }];
         b.main_focus = MainFocus::Info;
         b.info_enter(); // reveal the destination list
         b.info_down(); // move onto the destination
-        b.info_enter(); // expand its stats
+        b.info_enter(); // expand its stats + source-folder groups
+        b.info_down(); // move onto the (source root) group
+        b.info_enter(); // expand the group to reveal its mapped files
 
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| draw(f, &b)).unwrap();
@@ -1671,8 +1938,23 @@ mod tests {
             "expanded destination shows its own stats inline"
         );
         assert!(
-            rendered.contains("0 mapped"),
-            "mapped count is shown (placeholder 0 for now)"
+            rendered.contains("1 mapped"),
+            "the real mapped count is shown for the mapped source and destination"
+        );
+        assert!(
+            !rendered.contains("0 mapped"),
+            "the mapped count reflects the mappings, not the old placeholder 0"
+        );
+        // The expanded destination groups its mapped files by source folder; the
+        // root-level source file lands in the "(source root)" group, and expanding
+        // that group lists the file as source → target.
+        assert!(
+            rendered.contains("(source root)"),
+            "mapped files are grouped under a source-folder accordion"
+        );
+        assert!(
+            rendered.contains("hello.txt") && rendered.contains("inside.txt"),
+            "the expanded group lists its mapped files (source → target)"
         );
     }
 
@@ -1693,6 +1975,7 @@ mod tests {
         };
         let b = Browser::home(
             Some(config),
+            Vec::new(),
             Some("Everything is already in sync — nothing to do.".into()),
         );
 
@@ -1791,12 +2074,32 @@ mod tests {
     }
 
     #[test]
+    fn map_files_action_opens_mappings_when_ready() {
+        let mut b = Browser::new();
+        // The fourth action row is "Map files".
+        b.actions_sel = 3;
+
+        b.activate_action(); // no source/dest yet → refuses, stays put
+        assert!(b.outcome.is_none());
+        assert!(b.status_is_error);
+
+        b.source = Some(PathBuf::from("/src"));
+        b.destinations.push(PathBuf::from("/dst"));
+        b.activate_action(); // now ready → opens the mapping screen
+        assert!(matches!(b.outcome, Some(Outcome::OpenMappings)));
+    }
+
+    #[test]
     fn home_prefills_from_a_loaded_config_and_reads_it_back() {
         let config = Config {
             source: PathBuf::from("/src"),
             destinations: vec![PathBuf::from("/d0"), PathBuf::from("/d1")],
         };
-        let b = Browser::home(Some(config.clone()), Some("Last run — all good.".into()));
+        let b = Browser::home(
+            Some(config.clone()),
+            Vec::new(),
+            Some("Last run — all good.".into()),
+        );
         assert_eq!(b.source.as_deref(), Some(config.source.as_path()));
         assert_eq!(b.destinations, config.destinations);
         assert_eq!(b.last_run.as_deref(), Some("Last run — all good."));
