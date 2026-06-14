@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 const STORE_DIR: &str = ".bukagu";
 /// The store file inside [`STORE_DIR`].
 const STORE_FILE: &str = "bukagu-store.json";
-/// Bumped if the on-disk schema ever changes.
-const STORE_VERSION: u32 = 1;
+/// Bumped if the on-disk schema ever changes. v2 added `mappings`; older v1
+/// stores (no `mappings` key) still load — see [`Store::mappings`]'s serde default.
+const STORE_VERSION: u32 = 2;
 
 /// The user's sync configuration: one read-only source mirrored into many
 /// destinations, matched by relative path.
@@ -26,14 +27,33 @@ pub struct Config {
     pub destinations: Vec<PathBuf>,
 }
 
+/// One explicit v2 file mapping: a single source file (path relative to
+/// [`Config::source`]) copied into one or more destination files.
+///
+/// Targets are stored as absolute paths (each inside one of the destination
+/// folders). Every target may be written by **at most one** mapping — the
+/// duplicate-target rule the mapping editor and engine both enforce.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mapping {
+    /// Source file, relative to [`Config::source`].
+    pub source_rel: PathBuf,
+    /// Absolute destination files this source is written to (with a banner).
+    pub targets: Vec<PathBuf>,
+}
+
 /// The full store as serialized to JSON.
 ///
-/// Serializes flat: `{ version, source, destinations[], created_at, last_sync }`.
+/// Serializes flat: `{ version, source, destinations[], mappings[], created_at,
+/// last_sync }`. `mappings` is the v2 addition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Store {
     pub version: u32,
     #[serde(flatten)]
     pub config: Config,
+    /// v2 explicit file mappings. Defaults to empty so a v1 store (which has no
+    /// `mappings` key) loads unchanged.
+    #[serde(default)]
+    pub mappings: Vec<Mapping>,
     /// When the store was first written (RFC 3339, UTC).
     pub created_at: String,
     /// When the last successful sync finished, or `None` if never.
@@ -46,6 +66,7 @@ impl Store {
         Self {
             version: STORE_VERSION,
             config,
+            mappings: Vec::new(),
             created_at: now_rfc3339(),
             last_sync: None,
         }
@@ -130,7 +151,7 @@ pub fn normalize_cwd() -> Result<PathBuf> {
 }
 
 /// Current UTC time formatted as `YYYY-MM-DDTHH:MM:SSZ`, with no extra deps.
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -202,6 +223,52 @@ mod tests {
         assert!(raw.contains("\"source\""));
         assert!(raw.contains("\"destinations\""));
         assert!(!raw.contains("\"config\""));
+    }
+
+    #[test]
+    fn mappings_roundtrip_and_serialize_flat() {
+        let tmp = tempdir().unwrap();
+        let base = tmp.path();
+        let mut store = Store::new(Config {
+            source: PathBuf::from("/src"),
+            destinations: vec![PathBuf::from("/d1")],
+        });
+        store.mappings = vec![Mapping {
+            source_rel: PathBuf::from("a.py"),
+            targets: vec![PathBuf::from("/d1/a.py"), PathBuf::from("/d1/copy/a.py")],
+        }];
+        store.save_to(base).unwrap();
+
+        let raw = fs::read_to_string(path_in(base)).unwrap();
+        assert!(raw.contains("\"mappings\""), "mappings serialize flat");
+        assert!(raw.contains("\"version\": 2"), "new stores are v2");
+
+        let loaded = Store::load_from(base).unwrap().expect("store present");
+        assert_eq!(loaded.mappings.len(), 1);
+        assert_eq!(loaded.mappings[0].targets.len(), 2);
+    }
+
+    #[test]
+    fn v1_store_without_mappings_loads_with_empty_mappings() {
+        let tmp = tempdir().unwrap();
+        let base = tmp.path();
+        // A genuine v1 payload: version 1, no `mappings` key at all.
+        let v1 = r#"{
+            "version": 1,
+            "source": "/src",
+            "destinations": ["/d1"],
+            "created_at": "2026-06-13T00:00:00Z",
+            "last_sync": null
+        }"#;
+        fs::create_dir_all(dir_in(base)).unwrap();
+        fs::write(path_in(base), v1).unwrap();
+
+        let loaded = Store::load_from(base).unwrap().expect("store present");
+        assert_eq!(loaded.version, 1, "version field is preserved as read");
+        assert!(
+            loaded.mappings.is_empty(),
+            "a v1 store migrates to an empty mapping list"
+        );
     }
 
     #[test]
