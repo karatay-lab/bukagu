@@ -47,17 +47,18 @@ Grab a `.tar.gz` for your platform from the
 
 ## Uninstall
 
-Remove the binary the same way you installed it:
+Remove the binary using **only** the line that matches how you installed it (the others will
+just report "not found"):
 
-```bash
-rm ~/.local/bin/bukagu          # quick install (or your $BUKAGU_INSTALL_DIR / PATH location)
-sudo apt remove bukagu          # Debian / Ubuntu (.deb)
-brew uninstall bukagu           # Homebrew
-cargo uninstall bukagu          # crates.io
-```
+| Installed with | Remove with |
+| --- | --- |
+| Quick install / prebuilt binary | `rm ~/.local/bin/bukagu` (or your `$BUKAGU_INSTALL_DIR` / PATH location) |
+| Debian / Ubuntu (`.deb`) | `sudo apt remove bukagu` |
+| Homebrew | `brew uninstall bukagu` |
+| crates.io | `cargo uninstall bukagu` |
 
 bukagu keeps its state outside the binary, so removing the program leaves it behind. Delete
-whatever you no longer want:
+whatever you no longer want (each is safe to skip if it isn't there):
 
 ```bash
 rm -rf .bukagu                  # per-project config (the source/destination/mapping store)
