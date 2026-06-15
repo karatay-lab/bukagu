@@ -27,8 +27,6 @@ Download the `.deb` for your architecture from the
 sudo apt install ./bukagu-*.deb     # or: sudo dpkg -i bukagu-*.deb
 ```
 
-Uninstall with `sudo apt remove bukagu`.
-
 ### Homebrew (Linux & macOS)
 
 ```bash
@@ -46,6 +44,30 @@ cargo install bukagu
 Grab a `.tar.gz` for your platform from the
 [releases page](https://github.com/karatay-lab/bukagu/releases), extract, and put
 `bukagu` somewhere on your `PATH`. Each archive ships a `.sha256` checksum.
+
+## Uninstall
+
+Remove the binary the same way you installed it:
+
+```bash
+rm ~/.local/bin/bukagu          # quick install (or your $BUKAGU_INSTALL_DIR / PATH location)
+sudo apt remove bukagu          # Debian / Ubuntu (.deb)
+brew uninstall bukagu           # Homebrew
+cargo uninstall bukagu          # crates.io
+```
+
+bukagu keeps its state outside the binary, so removing the program leaves it behind. Delete
+whatever you no longer want:
+
+```bash
+rm -rf .bukagu                  # per-project config (the source/destination/mapping store)
+rm -rf ~/.config/bukagu         # saved API credentials (token + URL)
+rm -rf ~/bukagu-backups         # encrypted backup archives — see the caution below
+```
+
+> **Keep your backups in mind.** `~/bukagu-backups` holds your encrypted archives. Only your
+> private age identity can decrypt them — deleting this folder is permanent and irreversible.
+> Move it somewhere safe rather than deleting it if you might still need to restore.
 
 > **Safety first.** The source folder is **read-only to bukagu** — it only ever writes
 > into destinations (or, for backups, into `~/bukagu-backups`). This is enforced in code
