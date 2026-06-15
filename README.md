@@ -20,12 +20,21 @@ Installs to `~/.local/bin` by default. Override with `BUKAGU_INSTALL_DIR=/usr/lo
 
 ### Debian / Ubuntu (.deb)
 
-Download the `.deb` for your architecture from the
-[latest release](https://github.com/karatay-lab/bukagu/releases/latest), then:
+Download the `.deb` for your architecture, then install the file you saved. This one-liner
+fetches the matching `amd64`/`arm64` build from the latest release and installs it:
 
 ```bash
-sudo apt install ./bukagu-*.deb     # or: sudo dpkg -i bukagu-*.deb
+arch=$(dpkg --print-architecture)
+curl -fsSL -o /tmp/bukagu.deb "$(curl -fsSL \
+  https://api.github.com/repos/karatay-lab/bukagu/releases/latest \
+  | grep -o "https://[^\"]*-$arch\.deb")"
+sudo apt install /tmp/bukagu.deb     # or: sudo dpkg -i /tmp/bukagu.deb
 ```
+
+Prefer to do it by hand? Download the `.deb` from the
+[latest release](https://github.com/karatay-lab/bukagu/releases/latest) and pass apt the
+**actual path** to the file you saved (e.g. `sudo apt install ~/Downloads/bukagu-v0.1.1-amd64.deb`) —
+apt only treats an argument as a local file when it contains a `/`.
 
 ### Homebrew (Linux & macOS)
 
