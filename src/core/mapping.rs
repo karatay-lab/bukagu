@@ -340,7 +340,10 @@ pub fn guard_target(source: &Path, dest_roots: &[PathBuf], target: &Path) -> Res
 /// Resolve a path's longest existing prefix to its canonical form, then re-attach
 /// the remainder. Robust to `.`/`..`/symlinks even when the leaf doesn't exist yet
 /// (a target about to be created), so guardrail comparisons can't be fooled.
-fn resolved_abs(p: &Path) -> PathBuf {
+///
+/// Shared with the v3 backup guard ([`crate::backup`]), which likewise must check
+/// a not-yet-created destination against the read-only source.
+pub(crate) fn resolved_abs(p: &Path) -> PathBuf {
     for ancestor in p.ancestors() {
         if let Ok(canon) = ancestor.canonicalize() {
             let rest = p.strip_prefix(ancestor).unwrap_or(Path::new(""));

@@ -23,4 +23,10 @@ playground/
 # Local bukagu store — machine-specific source/destination paths, created at runtime
 /.bukagu/
 
+# Local environment file — may hold the API token (BUKAGU_API_TOKEN); never commit it.
+# A committed `.env.example` (no real secrets) is allowed.
+.env
+.env.*
+!.env.example
+
 # Note: Cargo.lock is intentionally committed — bukagu is a binary, not a library.

@@ -122,6 +122,8 @@ enum Outcome {
     Confirmed,
     /// "Map files" — open the v2 file-mapping screen with the current config.
     OpenMappings,
+    /// "Backup now" — run a v3 encrypted backup of the source.
+    OpenBackup,
     /// `q`/`Esc` — leave the home (any edits are still returned to the caller).
     Cancelled,
 }
@@ -133,6 +135,8 @@ pub enum HomeIntent {
     Sync,
     /// Open the v2 file-mapping screen with the returned config.
     Mappings,
+    /// Run a v3 encrypted backup of the source.
+    Backup,
     /// Close the home.
     Quit,
 }
@@ -144,7 +148,8 @@ struct Browser {
 
     // --- main view ---
     main_focus: MainFocus,
-    /// Highlighted action row (0 = source, 1 = destination, 2 = Sync now).
+    /// Highlighted action row (0 = source, 1 = destination, 2 = Sync now,
+    /// 3 = Map files, 4 = Backup now).
     actions_sel: usize,
     /// Whether the destination list is revealed under the `Destination Folders`
     /// header in the info pane.
@@ -518,8 +523,8 @@ impl Browser {
 
     // --- actions pane -------------------------------------------------------
 
-    /// The number of rows in the actions pane: source, destination, Sync now, Map files.
-    const ACTION_COUNT: usize = 4;
+    /// Rows in the actions pane: source, destination, Sync now, Map files, Backup now.
+    const ACTION_COUNT: usize = 5;
 
     fn actions_up(&mut self) {
         self.actions_sel = self.actions_sel.saturating_sub(1);
@@ -541,8 +546,12 @@ impl Browser {
                 self.confirm(); // "Sync now"
                 return;
             }
-            _ => {
+            3 => {
                 self.open_mappings(); // "Map files"
+                return;
+            }
+            _ => {
+                self.open_backup(); // "Backup now"
                 return;
             }
         };
@@ -693,6 +702,21 @@ impl Browser {
         self.outcome = Some(Outcome::OpenMappings);
     }
 
+    /// "Backup now": run a v3 encrypted backup of the source. Like the other
+    /// actions it needs a source and ≥1 destination (bukagu's home is built around
+    /// both); source-only backups are available from the `bukagu backup` CLI.
+    fn open_backup(&mut self) {
+        if self.current_config().is_none() {
+            if self.source.is_none() {
+                self.error("Choose a source first ([s]) before backing up.");
+            } else {
+                self.error("Add at least one destination ([a]) before backing up.");
+            }
+            return;
+        }
+        self.outcome = Some(Outcome::OpenBackup);
+    }
+
     fn cancel(&mut self) {
         self.outcome = Some(Outcome::Cancelled);
     }
@@ -767,6 +791,10 @@ impl Browser {
             KeyCode::Char('m') => {
                 self.actions_sel = 3;
                 self.open_mappings();
+            }
+            KeyCode::Char('b') => {
+                self.actions_sel = 4;
+                self.open_backup();
             }
             KeyCode::Char('q') | KeyCode::Esc => self.prompt_quit(),
             _ => match self.main_focus {
@@ -869,6 +897,7 @@ fn run_loop(terminal: &mut DefaultTerminal, browser: &mut Browser) -> Result<Hom
             return Ok(match outcome {
                 Outcome::Confirmed => HomeIntent::Sync,
                 Outcome::OpenMappings => HomeIntent::Mappings,
+                Outcome::OpenBackup => HomeIntent::Backup,
                 Outcome::Cancelled => HomeIntent::Quit,
             });
         }
@@ -1094,11 +1123,23 @@ fn draw_actions(frame: &mut Frame, b: &Browser, area: Rect) {
             Style::default().fg(theme::TEXT_DIM),
         )
     };
+    let backup_hint = if ready {
+        Span::styled(
+            "  (encrypted backup of the source → ~/bukagu-backups)",
+            Style::default().fg(theme::COPY),
+        )
+    } else {
+        Span::styled(
+            "  (choose a source + destination first)",
+            Style::default().fg(theme::TEXT_DIM),
+        )
+    };
     let rows = [
         ("Select source folder", source_hint),
         ("Select destination folder", dest_hint),
         ("Sync now", sync_hint),
         ("Map files", map_hint),
+        ("Backup now", backup_hint),
     ];
     let items: Vec<ListItem> = rows
         .into_iter()
@@ -1459,6 +1500,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
             "m",
             "Map files (source file → destination file, with a banner)",
         ),
+        key("b", "Backup now (encrypted backup of the source)"),
         Line::from(""),
         section("  Folder browser"),
         key("↑ / ↓  j / k", "move the selection"),
@@ -2087,6 +2129,22 @@ mod tests {
         b.destinations.push(PathBuf::from("/dst"));
         b.activate_action(); // now ready → opens the mapping screen
         assert!(matches!(b.outcome, Some(Outcome::OpenMappings)));
+    }
+
+    #[test]
+    fn backup_now_action_opens_backup_when_ready() {
+        let mut b = Browser::new();
+        // The fifth action row is "Backup now".
+        b.actions_sel = 4;
+
+        b.activate_action(); // no source/dest yet → refuses, stays put
+        assert!(b.outcome.is_none());
+        assert!(b.status_is_error);
+
+        b.source = Some(PathBuf::from("/src"));
+        b.destinations.push(PathBuf::from("/dst"));
+        b.activate_action(); // now ready → asks to run a backup
+        assert!(matches!(b.outcome, Some(Outcome::OpenBackup)));
     }
 
     #[test]
