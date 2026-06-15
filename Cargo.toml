@@ -1,6 +1,6 @@
 [package]
 name = "bukagu"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Berkay Karatay <karatay.berkay@gmail.com>"]
 description = "A Swiss Army knife CLI for developers — file management and folder syncing from the terminal."
