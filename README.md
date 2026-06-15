@@ -53,7 +53,7 @@ Grab a `.tar.gz` for your platform from the
 > bukagu refuses to run if a destination — or a backup/restore folder — equals, sits inside,
 > or contains the source.
 
-## What it does (v1)
+## What it does
 
 - **One-way mirror.** A single **source** folder (your master files) is mirrored into a
   list of **destination** folders. Each destination is made to match the source,
@@ -95,10 +95,10 @@ you like without restarting:
 - **Select destination folder** — add/remove the folders it mirrors into.
 - **Sync now** — mirror the source into every destination (opens the sync dashboard, then
   returns here with the result shown under *Last run*).
-- **Map files** — open the **file-mapping** screen (v2): map individual source files to specific
+- **Map files** — open the **file-mapping** screen: map individual source files to specific
   destination files, each written with a "managed by bukagu" banner. See *File mappings* below.
-- **Backup now** — make an **encrypted backup** of the source into `~/bukagu-backups` (v3). See
-  *Encrypted backups* below.
+- **Backup now** — make an **encrypted backup** of the source into `~/bukagu-backups` (needs only a
+  source — no destination). See *Encrypted backups* below.
 
 On a first run the home starts empty; on later runs it opens pre-filled from your saved store.
 Any edit you make is saved back to the store immediately. Activating *Select source/destination*
@@ -164,9 +164,9 @@ At the Done/Error screen, `Enter` or `q` returns to the home. Passing `-y`/`--ye
 the home and the Review step, so a returning `bukagu --yes` syncs straight away (handy for
 scripts).
 
-### File mappings (v2)
+### File mappings
 
-Where the v1 mirror copies *whole folders* by relative path, **file mappings** let you wire up
+Where the folder mirror copies *whole folders* by relative path, **file mappings** let you wire up
 individual files: one **source file → one or more destination files**. Choose **Map files** (or
 press `m`) on the home to open the mapping screen — a **two-pane page**: **Sources** on the left,
 **Destinations** on the right, and a destination-folder info accordion below.
@@ -211,7 +211,7 @@ the pre-sync summary flag any violation. Mappings are saved in the store alongsi
 | `s` | Review the summary, then sync |
 | `q` / `Esc` | Leave the mapping screen (asks you to confirm) |
 
-### Encrypted backups (v3)
+### Encrypted backups
 
 bukagu can also keep **encrypted, off-site backups of the source folder itself** — not just mirror it
 into local destinations. Each backup is one timestamped, `age`-encrypted archive
@@ -272,7 +272,7 @@ site and a tampered response can't redirect your backups to someone else's key.
 
 ### Flags
 
-The bare `bukagu` opens the home screen as before. v3 adds three **subcommands** — `bukagu auth`,
+The bare `bukagu` opens the home screen. bukagu also has three **subcommands** — `bukagu auth`,
 `bukagu backup`, and `bukagu restore` (see *Encrypted backups* above). The flags below apply to the
 default (no-subcommand) sync run.
 
@@ -303,10 +303,12 @@ destination are left alone unless `--delete` is given.
 
 ## Symlinks
 
-In v1, **symlinks are skipped entirely** — a symlink to a file or a directory is never
-copied, hashed, or deleted, and symlinked directories are not descended into. This keeps
-a mirror predictable: it never follows a link out of the source tree and never recreates
-one in a destination. (Richer symlink modes may come in a later version.)
+**Symlinks are skipped entirely** — a symlink to a file or a directory is never copied,
+hashed, deleted, or archived, and symlinked directories are not descended into. This
+applies wherever bukagu walks a tree: the folder mirror, the encrypted backup, and the
+file-mapping screen (which only ever lists real files to map). It keeps behavior
+predictable: bukagu never follows a link out of the source tree and never recreates one in
+a destination. (Richer symlink modes may come in a later version.)
 
 ## State file
 
@@ -326,11 +328,12 @@ bukagu stores your configuration at `./.bukagu/bukagu-store.json`:
 }
 ```
 
-`last_sync` is stamped after each successful (non-dry-run) sync. `mappings` holds the v2 file
-mappings (`source_rel` is relative to the source; `targets` are absolute destination files). `backup`
-holds the v3 backup settings — an optional `root` (defaults to `~/bukagu-backups`), `retention` (how many
-archives to keep, default 10), and `last_backup` (stamped after each successful backup). Older stores
-load unchanged: a missing `mappings` or `backup` key is treated as empty/default. (API credentials are
+`version` records the on-disk schema (stamped whenever bukagu writes the store). `last_sync` is
+stamped after each successful (non-dry-run) sync. `mappings` holds the explicit file mappings
+(`source_rel` is relative to the source; `targets` are absolute destination files). `backup` holds the
+backup settings — an optional `root` (defaults to `~/bukagu-backups`), `retention` (how many archives to
+keep, default 10), and `last_backup` (stamped after each successful backup). Older stores load
+unchanged: a missing `mappings` or `backup` key is treated as empty/default. (API credentials are
 **not** stored here — they live in `~/.config/bukagu/credentials.json`.)
 
 ## License

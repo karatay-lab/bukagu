@@ -124,7 +124,7 @@ async fn run() -> Result<()> {
                 }
                 Some(_) => {}
                 None => {
-                    let s = Store::new(config.clone());
+                    let mut s = Store::new(config.clone());
                     s.save().context("writing the store")?;
                     store = Some(s);
                 }
@@ -150,9 +150,10 @@ async fn run() -> Result<()> {
                 last_run = run_mappings(store.as_mut(), &config, opts)?;
             }
             HomeIntent::Backup => {
-                // open_backup() also requires a source + ≥1 destination.
+                // A backup only reads the source, so open_backup() requires just a
+                // source (no destination) — config is Some whenever a source is set.
                 let Some(config) = config else {
-                    last_run = Some("Add a source and a destination before backing up.".into());
+                    last_run = Some("Add a source before backing up.".into());
                     continue;
                 };
                 last_run = Some(run_backup_home(store.as_mut(), &config).await?);
