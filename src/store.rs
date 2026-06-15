@@ -121,7 +121,7 @@ impl Store {
     }
 
     /// Save the store under `./.bukagu/`, creating the folder if needed.
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&mut self) -> Result<()> {
         self.save_to(Path::new("."))
     }
 
@@ -139,7 +139,13 @@ impl Store {
     }
 
     /// Like [`Store::save`] but rooted at `base` (used in tests).
-    pub fn save_to(&self, base: &Path) -> Result<()> {
+    pub fn save_to(&mut self, base: &Path) -> Result<()> {
+        // bukagu always writes the full current schema, so stamp the on-disk
+        // version with what we're actually writing. [`Store::load`] preserves the
+        // version it read (so an unopened store keeps its number), but the moment
+        // we re-save we've upgraded it — keeping the field a truthful record of the
+        // schema on disk rather than freezing it at the store's creation version.
+        self.version = STORE_VERSION;
         let dir = dir_in(base);
         fs::create_dir_all(&dir)
             .with_context(|| format!("creating store dir {}", dir.display()))?;
@@ -319,6 +325,34 @@ mod tests {
         assert!(
             loaded.mappings.is_empty(),
             "a v1 store migrates to an empty mapping list"
+        );
+    }
+
+    #[test]
+    fn resaving_an_old_store_upgrades_its_version() {
+        let tmp = tempdir().unwrap();
+        let base = tmp.path();
+        // A genuine v1 payload on disk.
+        let v1 = r#"{
+            "version": 1,
+            "source": "/src",
+            "destinations": ["/d1"],
+            "created_at": "2026-06-13T00:00:00Z",
+            "last_sync": null
+        }"#;
+        fs::create_dir_all(dir_in(base)).unwrap();
+        fs::write(path_in(base), v1).unwrap();
+
+        // Loading preserves the on-disk version…
+        let mut loaded = Store::load_from(base).unwrap().expect("store present");
+        assert_eq!(loaded.version, 1, "load preserves the version as read");
+
+        // …but the next save upgrades it to the current schema version.
+        loaded.save_to(base).unwrap();
+        let reloaded = Store::load_from(base).unwrap().expect("store present");
+        assert_eq!(
+            reloaded.version, STORE_VERSION,
+            "re-saving stamps the current version"
         );
     }
 

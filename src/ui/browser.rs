@@ -311,17 +311,26 @@ impl Browser {
         }
     }
 
-    /// The config the user has assembled, or `None` until a source and at least one
-    /// destination are chosen.
-    fn current_config(&self) -> Option<Config> {
-        let source = self.source.clone()?;
-        if self.destinations.is_empty() {
-            return None;
-        }
+    /// Everything the user has assembled so far — `Some` as soon as a source is
+    /// chosen, with whatever destinations exist (possibly none). This is what the
+    /// home returns to the caller: it's enough for a source-only backup and is
+    /// persisted so the source is remembered even before any destination is added.
+    fn assembled_config(&self) -> Option<Config> {
         Some(Config {
-            source,
+            source: self.source.clone()?,
             destinations: self.destinations.clone(),
         })
+    }
+
+    /// The config the user has assembled, or `None` until a source **and at least
+    /// one destination** are chosen. Sync and file-mapping need a destination to
+    /// write into; "Backup now" does not (it only reads the source).
+    fn current_config(&self) -> Option<Config> {
+        let config = self.assembled_config()?;
+        if config.destinations.is_empty() {
+            return None;
+        }
+        Some(config)
     }
 
     fn info(&mut self, msg: impl Into<String>) {
@@ -702,16 +711,12 @@ impl Browser {
         self.outcome = Some(Outcome::OpenMappings);
     }
 
-    /// "Backup now": run a v3 encrypted backup of the source. Like the other
-    /// actions it needs a source and ≥1 destination (bukagu's home is built around
-    /// both); source-only backups are available from the `bukagu backup` CLI.
+    /// "Backup now": run an encrypted backup of the source. A backup only reads the
+    /// source, so — unlike Sync and Map files — it needs **no** destination; a
+    /// source is enough. This matches what `bukagu backup` accepts from the CLI.
     fn open_backup(&mut self) {
-        if self.current_config().is_none() {
-            if self.source.is_none() {
-                self.error("Choose a source first ([s]) before backing up.");
-            } else {
-                self.error("Add at least one destination ([a]) before backing up.");
-            }
+        if self.source.is_none() {
+            self.error("Choose a source first ([s]) before backing up.");
             return;
         }
         self.outcome = Some(Outcome::OpenBackup);
@@ -880,7 +885,7 @@ pub fn run_home(
     let result = run_loop(&mut terminal, &mut browser);
     ratatui::restore();
     let intent = result?;
-    Ok((browser.current_config(), intent))
+    Ok((browser.assembled_config(), intent))
 }
 
 fn run_loop(terminal: &mut DefaultTerminal, browser: &mut Browser) -> Result<HomeIntent> {
@@ -1123,14 +1128,16 @@ fn draw_actions(frame: &mut Frame, b: &Browser, area: Rect) {
             Style::default().fg(theme::TEXT_DIM),
         )
     };
-    let backup_hint = if ready {
+    // A backup only reads the source, so it's ready as soon as a source is chosen
+    // — no destination required (unlike Sync and Map files).
+    let backup_hint = if b.source.is_some() {
         Span::styled(
             "  (encrypted backup of the source → ~/bukagu-backups)",
             Style::default().fg(theme::COPY),
         )
     } else {
         Span::styled(
-            "  (choose a source + destination first)",
+            "  (choose a source first)",
             Style::default().fg(theme::TEXT_DIM),
         )
     };
@@ -2132,19 +2139,24 @@ mod tests {
     }
 
     #[test]
-    fn backup_now_action_opens_backup_when_ready() {
+    fn backup_now_action_opens_backup_with_source_only() {
         let mut b = Browser::new();
         // The fifth action row is "Backup now".
         b.actions_sel = 4;
 
-        b.activate_action(); // no source/dest yet → refuses, stays put
+        b.activate_action(); // no source yet → refuses, stays put
         assert!(b.outcome.is_none());
         assert!(b.status_is_error);
 
+        // A backup only reads the source: a source alone (no destination) is enough.
         b.source = Some(PathBuf::from("/src"));
-        b.destinations.push(PathBuf::from("/dst"));
-        b.activate_action(); // now ready → asks to run a backup
+        b.activate_action();
         assert!(matches!(b.outcome, Some(Outcome::OpenBackup)));
+
+        // And the config handed back carries the source with empty destinations.
+        let cfg = b.assembled_config().expect("source-only config");
+        assert_eq!(cfg.source, PathBuf::from("/src"));
+        assert!(cfg.destinations.is_empty());
     }
 
     #[test]

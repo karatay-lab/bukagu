@@ -67,8 +67,12 @@ pub fn default_backup_root() -> Result<PathBuf> {
 }
 
 /// The per-project backup folder: `{settings.root or ~/bukagu-backups}/<project>`,
-/// where `<project>` is a filesystem-safe form of the project root's folder name
-/// (so different repos don't collide under one root).
+/// where `<project>` is a filesystem-safe form of the project root's folder name.
+///
+/// This keys backups by the launch folder's *name* only, so two different repos
+/// that happen to share a leaf name (e.g. `~/a/app` and `~/b/app`) map to the same
+/// `<root>/app` and would share a retention pool. Point `settings.root` at distinct
+/// folders if you back up same-named projects.
 pub fn resolve_backup_dir(settings: &BackupSettings, project_root: &Path) -> Result<PathBuf> {
     let root = match &settings.root {
         Some(r) => r.clone(),
