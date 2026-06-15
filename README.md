@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/karatay-lab/bukagu/main/install.sh 
 ```
 
 Installs to `~/.local/bin` by default. Override with `BUKAGU_INSTALL_DIR=/usr/local/bin`
-(may need `sudo`) or pin a version with `BUKAGU_VERSION=v0.1.0`.
+(may need `sudo`) or pin a version with `BUKAGU_VERSION=v0.1.1`.
 
 ### Debian / Ubuntu (.deb)
 

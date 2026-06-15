@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/karatay-lab/bukagu/main/install.sh | sh
 #
 # Env overrides:
-#   BUKAGU_VERSION      tag to install (default: latest release, e.g. v0.1.0)
+#   BUKAGU_VERSION      tag to install (default: latest release, e.g. v0.1.1)
 #   BUKAGU_INSTALL_DIR  where to put the binary (default: ~/.local/bin)
 set -eu
 
