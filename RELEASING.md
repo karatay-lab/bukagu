@@ -15,8 +15,8 @@ triggered by pushing a semver tag. Each release publishes:
 ```bash
 # 1. Bump the version in Cargo.toml, commit.
 # 2. Tag and push:
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The workflow creates the GitHub Release and attaches everything above.
