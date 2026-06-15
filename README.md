@@ -1,8 +1,8 @@
 # bukagu
 
-A Swiss Army knife CLI/TUI for developers, written in Rust. The first tool it ships
-with is **folder syncing**: mirror one master folder into many backups, on demand,
-from a colorful terminal dashboard.
+A Swiss Army knife CLI/TUI for developers, written in Rust. It ships with **folder
+syncing** (mirror one master folder into many backups, on demand, from a colorful
+terminal dashboard) and **encrypted off-site backups** of that master folder.
 
 ## Install
 
@@ -48,9 +48,10 @@ Grab a `.tar.gz` for your platform from the
 `bukagu` somewhere on your `PATH`. Each archive ships a `.sha256` checksum.
 
 > **Safety first.** The source folder is **read-only to bukagu** — it only ever writes
-> into destinations. This is enforced in code (canonicalized path checks before any
-> scan *and* before any write), not just by convention. bukagu refuses to run if a
-> destination equals, sits inside, or contains the source.
+> into destinations (or, for backups, into `~/bukagu-backups`). This is enforced in code
+> (canonicalized path checks before any scan *and* before any write), not just by convention.
+> bukagu refuses to run if a destination — or a backup/restore folder — equals, sits inside,
+> or contains the source.
 
 ## What it does (v1)
 
@@ -96,6 +97,8 @@ you like without restarting:
   returns here with the result shown under *Last run*).
 - **Map files** — open the **file-mapping** screen (v2): map individual source files to specific
   destination files, each written with a "managed by bukagu" banner. See *File mappings* below.
+- **Backup now** — make an **encrypted backup** of the source into `~/bukagu-backups` (v3). See
+  *Encrypted backups* below.
 
 On a first run the home starts empty; on later runs it opens pre-filled from your saved store.
 Any edit you make is saved back to the store immediately. Activating *Select source/destination*
@@ -117,6 +120,7 @@ project root (where bukagu was launched).
 | `s` / `a` | Jump straight to choosing a **source** / adding a **destination** |
 | `c` | **Sync now** (mirror source → destinations) |
 | `m` | **Map files** (open the file-mapping screen) |
+| `b` | **Backup now** (encrypted backup of the source) |
 | `Ctrl+Q` | Toggle a full-screen overlay listing every shortcut |
 | `q` / `Esc` | Leave the home (any edits are already saved) |
 
@@ -207,7 +211,70 @@ the pre-sync summary flag any violation. Mappings are saved in the store alongsi
 | `s` | Review the summary, then sync |
 | `q` / `Esc` | Leave the mapping screen (asks you to confirm) |
 
+### Encrypted backups (v3)
+
+bukagu can also keep **encrypted, off-site backups of the source folder itself** — not just mirror it
+into local destinations. Each backup is one timestamped, `age`-encrypted archive
+(`tar` → gzip → encrypt) written under `~/bukagu-backups/<project>/`.
+
+The encryption is **asymmetric**, and that's the point: bukagu fetches only a **public recipient key**
+from your own web service and encrypts *to* it. The machine running bukagu can make backups but can
+**never decrypt them** — only the matching **private identity**, which you keep on your website, can.
+A lost or compromised laptop therefore can't read your past backups.
+
+**One-time setup.** Log in to your website, copy your API token, and save it:
+
+```bash
+bukagu auth login --url https://your-api.example.com   # paste the token at the hidden prompt
+bukagu auth status                                      # confirm (never prints the token)
+```
+
+The token and URL are stored in `~/.config/bukagu/credentials.json` (`chmod 600`), overridable with the
+`BUKAGU_API_TOKEN` / `BUKAGU_API_URL` environment variables. A project-local `.env` is auto-loaded at
+startup too (a real exported variable still wins; `.env` is gitignored — see `.env.example`). Precedence:
+**exported env → `.env` → the `0600` config file**. Credentials are never written into the repo's
+`.bukagu/` store. If your API serves the key under a route other than `/recipient`, set
+`BUKAGU_API_RECIPIENT_PATH`.
+
+**Make a backup** — from the home screen press **`b`** (*Backup now*), or from the CLI:
+
+```bash
+bukagu backup            # encrypt the source → ~/bukagu-backups/<project>/<timestamp>.tar.gz.age
+bukagu backup --dry-run  # preview (fetch the key, count files) without writing
+```
+
+bukagu keeps the newest **10** archives per project by default and prunes older ones.
+
+**Restore** (on any machine) needs your **private age identity**, obtained from your website:
+
+```bash
+bukagu restore --identity @age-key.txt                 # newest backup → ./bukagu-restore-<timestamp>
+bukagu restore --identity @age-key.txt \
+  --archive ~/bukagu-backups/myproj/2026….tar.gz.age --into /tmp/restored
+```
+
+Pass the identity as a file (`@path`), via stdin (`-`), or at the hidden prompt — not as a flag value,
+so it doesn't land in your shell history. Restore **never** writes into the read-only source: it refuses
+a target that equals, sits inside, or contains the source — even with `--force` (which only lets you
+restore into an existing non-empty directory).
+
+**The API contract.** bukagu expects your service to expose one endpoint:
+
+```text
+GET {api_url}/recipient
+Authorization: Bearer <token>
+→ 200, body: an age recipient public key, e.g. "age1qz…"
+```
+
+bukagu calls it over **HTTPS only** (rustls), never follows redirects carrying the auth header, and
+rejects any response that isn't a valid `age1…` recipient — so the private identity never leaves your
+site and a tampered response can't redirect your backups to someone else's key.
+
 ### Flags
+
+The bare `bukagu` opens the home screen as before. v3 adds three **subcommands** — `bukagu auth`,
+`bukagu backup`, and `bukagu restore` (see *Encrypted backups* above). The flags below apply to the
+default (no-subcommand) sync run.
 
 | Flag | Effect |
 | --- | --- |
@@ -247,20 +314,24 @@ bukagu stores your configuration at `./.bukagu/bukagu-store.json`:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "source": "/path/to/master",
   "destinations": ["/path/to/backup-a", "/path/to/backup-b"],
   "mappings": [
     { "source_rel": "app.py", "targets": ["/path/to/backup-a/app.py"] }
   ],
+  "backup": { "last_backup": "2026-06-15T09:00:00Z" },
   "created_at": "2026-06-13T10:00:00Z",
   "last_sync": "2026-06-13T11:30:00Z"
 }
 ```
 
 `last_sync` is stamped after each successful (non-dry-run) sync. `mappings` holds the v2 file
-mappings (`source_rel` is relative to the source; `targets` are absolute destination files). A v1
-store with no `mappings` key still loads — it's treated as an empty mapping list.
+mappings (`source_rel` is relative to the source; `targets` are absolute destination files). `backup`
+holds the v3 backup settings — an optional `root` (defaults to `~/bukagu-backups`), `retention` (how many
+archives to keep, default 10), and `last_backup` (stamped after each successful backup). Older stores
+load unchanged: a missing `mappings` or `backup` key is treated as empty/default. (API credentials are
+**not** stored here — they live in `~/.config/bukagu/credentials.json`.)
 
 ## License
 

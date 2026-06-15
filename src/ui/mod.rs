@@ -4,6 +4,7 @@
 //! returning-run sync screen (Step 5); `widgets` holds the small reusable pieces
 //! they share.
 
+pub mod backup;
 pub mod browser;
 pub mod dashboard;
 pub mod mappings;
